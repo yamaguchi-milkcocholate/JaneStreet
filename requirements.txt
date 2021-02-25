@@ -79,6 +79,7 @@ Pygments==2.8.0
 pyparsing==2.4.7
 pyrsistent==0.17.3
 python-dateutil==2.8.1
+pytorch-ignite==0.4.3
 pytorch-pfn-extras==0.3.2
 pytz==2021.1
 PyWavelets==1.1.1
