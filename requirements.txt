@@ -3,7 +3,7 @@ aiohttp==3.7.4
 albumentations==0.5.2
 anyio==2.1.0
 anykeystore==0.2
-apex==0.9.10.dev0
+apex==0.1
 argon2-cffi==20.1.0
 async-generator==1.10
 async-timeout==3.0.1
