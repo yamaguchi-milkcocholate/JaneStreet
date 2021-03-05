@@ -151,7 +151,7 @@ class StratifiedKFoldWrapper:
     def generate_datasets(self) -> Tuple[ChestXRayDataset, ChestXRayDataset]:
         train_idx, valid_idx = self.split_idxs[self.__i]
         if self.debug:
-            n_sample = 1000
+            n_sample = 50
             train_idx = train_idx[random.sample(list(range(len(train_idx))), n_sample)]
             valid_idx = valid_idx[random.sample(list(range(len(valid_idx))), n_sample)]
         
