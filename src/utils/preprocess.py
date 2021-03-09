@@ -14,6 +14,10 @@ import torch
 from torch.utils.data.dataset import Dataset
 from sklearn.model_selection import StratifiedKFold
 
+import torchvision
+assert torch.__version__.startswith("1.7")
+from detectron2.structures import BoxMode
+
 
 class Transform:
     def __init__(self, aug_kwargs: Dict):
@@ -25,11 +29,17 @@ class Transform:
 
 
 class ChestXRayDataset(Dataset):
-    def __init__(self, filepaths: List[str], labels: List[int], label_smoothing: float = 0., mixup_prob: float = 0., image_transform: Transform = None, oversample: bool = False):
+    def __init__(self, filepaths: List[str], labels: List[int], label_smoothing: float = 0., mixup_prob: float = 0., 
+                 image_transform: Transform = None, oversample: bool = False, downsample: bool = False):
         self.filepaths = filepaths
         self.labels = labels
+
+        assert not (oversample and downsample)
         if oversample:
             self.__oversample()
+        
+        elif downsample:
+            self.__downsample()
         
         self.label_smoothing = label_smoothing
         self.mixup_prob = mixup_prob
@@ -83,10 +93,28 @@ class ChestXRayDataset(Dataset):
         self.filepaths += np.array(self.filepaths)[sample_idx].tolist()
         self.labels += np.array(self.labels)[sample_idx].tolist()
 
+    def __downsample(self):
+        labels = np.array(self.labels)
+        n_pos, n_neg = (labels == 1).sum(), (labels == 0).sum()
+        
+        sample_class = 1 if n_pos > n_neg else 0
+        n_sample = np.minimum(n_pos, n_neg)
+
+        print(f'#Positive: {n_pos}, #Negative: {n_neg}  | down sample: Class{sample_class} {n_sample}')
+
+        population = np.where(labels == sample_class)[0]
+        random.seed(111)
+        sample_idx = random.choices(population.tolist(), k=n_sample)
+
+        remain_idx = np.where(labels != sample_class)[0].tolist()
+
+        self.filepaths = np.array(self.filepaths)[sample_idx + remain_idx].tolist()
+        self.labels = np.array(self.labels)[sample_idx + remain_idx].tolist()
+
 
 class StratifiedKFoldWrapper:
     def __init__(self, datadir: Path, n_splits: int, shuffle: bool, seed: int, 
-                 label_smoothing: float = 0., mixup_prob: float = 0., aug_kwargs: Dict = {}, debug: bool = False, oversample: bool = True):
+                 label_smoothing: float = 0., mixup_prob: float = 0., aug_kwargs: Dict = {}, debug: bool = False, oversample: bool = False, downsample: bool = False):
         self.datadir = datadir
         fl = self.__load_filelist()
         fp = self.__load_filepath()
@@ -104,7 +132,9 @@ class StratifiedKFoldWrapper:
         self.image_transform = Transform(aug_kwargs=aug_kwargs)
 
         self.debug = debug
+
         self.oversample = oversample
+        self.downsample = downsample
         
     def __load_filelist(self):
         df = pd.read_csv(self.datadir / 'Data_Entry_2017.csv')
@@ -161,7 +191,8 @@ class StratifiedKFoldWrapper:
             label_smoothing=self.label_smoothing,
             mixup_prob=self.mixup_prob,
             image_transform=self.image_transform,
-            oversample=self.oversample
+            oversample=self.oversample,
+            downsample=self.downsample,
         )
         valid_ds = ChestXRayDataset(
             filepaths=self.datalist['filepath'].values[valid_idx].tolist(),
@@ -169,3 +200,115 @@ class StratifiedKFoldWrapper:
         )
         
         return train_ds, valid_ds
+
+
+def get_vinbigdata_dicts(
+    imgdir: Path,
+    train_df: pd.DataFrame,
+    train_data_type: str = "original",
+    use_cache: bool = True,
+    debug: bool = True,
+    target_indices: Optional[np.ndarray] = None
+    ):
+    debug_str = f"_debug{int(debug)}"
+    train_data_type_str = f"_{train_data_type}"
+    cache_path = Path(".") / f"dataset_dicts_cache{train_data_type_str}{debug_str}.pkl"
+    if not use_cache or not cache_path.exists():
+        print("Creating data...")
+        train_meta = pd.read_csv(imgdir / "train_meta.csv")
+        if debug:
+            train_meta = train_meta.iloc[:500]  # For debug....
+
+        # Load 1 image to get image size.
+        image_id = train_meta.loc[0, "image_id"]
+        image_path = str(imgdir / "train" / f"{image_id}.png")
+        image = cv2.imread(image_path)
+        resized_height, resized_width, ch = image.shape
+        print(f"image shape: {image.shape}")
+
+        dataset_dicts = []
+        for index, train_meta_row in tqdm(train_meta.iterrows(), total=len(train_meta)):
+            record = {}
+
+            image_id, height, width = train_meta_row.values
+            filename = str(imgdir / "train" / f"{image_id}.png")
+            record["file_name"] = filename
+            record["image_id"] = image_id
+            record["height"] = resized_height
+            record["width"] = resized_width
+            objs = []
+            for index2, row in train_df.query("image_id == @image_id").iterrows():
+                # print(row)
+                # print(row["class_name"])
+                # class_name = row["class_name"]
+                class_id = row["class_id"]
+                if class_id == 14:
+                    # It is "No finding"
+                    # This annotator does not find anything, skip.
+                    pass
+                else:
+                    # bbox_original = [int(row["x_min"]), int(row["y_min"]), int(row["x_max"]), int(row["y_max"])]
+                    h_ratio = resized_height / height
+                    w_ratio = resized_width / width
+                    bbox_resized = [
+                        int(row["x_min"]) * w_ratio,
+                        int(row["y_min"]) * h_ratio,
+                        int(row["x_max"]) * w_ratio,
+                        int(row["y_max"]) * h_ratio,
+                    ]
+                    obj = {
+                        "bbox": bbox_resized,
+                        "bbox_mode": BoxMode.XYXY_ABS,
+                        "category_id": class_id,
+                    }
+                    objs.append(obj)
+            record["annotations"] = objs
+            dataset_dicts.append(record)
+        with open(cache_path, mode="wb") as f:
+            pickle.dump(dataset_dicts, f)
+
+    print(f"Load from cache {cache_path}")
+    with open(cache_path, mode="rb") as f:
+        dataset_dicts = pickle.load(f)
+    if target_indices is not None:
+        dataset_dicts = [dataset_dicts[i] for i in target_indices]
+    return dataset_dicts
+
+
+def get_vinbigdata_dicts_test(imgdir: Path, test_meta: pd.DataFrame, use_cache: bool = True, debug: bool = True):
+    debug_str = f"_debug{int(debug)}"
+    cache_path = Path(".") / f"dataset_dicts_cache_test{debug_str}.pkl"
+    if not use_cache or not cache_path.exists():
+        print("Creating data...")
+        # test_meta = pd.read_csv(imgdir / "test_meta.csv")
+        if debug:
+            test_meta = test_meta.iloc[:500]  # For debug....
+
+        # Load 1 image to get image size.
+        image_id = test_meta.loc[0, "image_id"]
+        image_path = str(imgdir / "test" / f"{image_id}.png")
+        image = cv2.imread(image_path)
+        resized_height, resized_width, ch = image.shape
+        print(f"image shape: {image.shape}")
+
+        dataset_dicts = []
+        for index, test_meta_row in tqdm(test_meta.iterrows(), total=len(test_meta)):
+            record = {}
+
+            image_id, height, width = test_meta_row.values
+            filename = str(imgdir / "test" / f"{image_id}.png")
+            record["file_name"] = filename
+            # record["image_id"] = index
+            record["image_id"] = image_id
+            record["height"] = resized_height
+            record["width"] = resized_width
+            # objs = []
+            # record["annotations"] = objs
+            dataset_dicts.append(record)
+        with open(cache_path, mode="wb") as f:
+            pickle.dump(dataset_dicts, f)
+
+    print(f"Load from cache {cache_path}")
+    with open(cache_path, mode="rb") as f:
+        dataset_dicts = pickle.load(f)
+    return dataset_dicts
