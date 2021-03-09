@@ -1,2 +1,3 @@
 results*/*
 *.pkl
+lightning_logs/*
