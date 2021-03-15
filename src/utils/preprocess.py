@@ -20,12 +20,20 @@ from detectron2.structures import BoxMode
 
 
 class Transform:
-    def __init__(self, aug_kwargs: Dict):
-        self.transform = A.Compose([getattr(A, name)(**kwargs) for name, kwargs in aug_kwargs.items()])
+    def __init__(self, aug_kwargs: Dict, train: bool = False):
+        self.train = train
 
-    def __call__(self, image):
-        image = self.transform(image=image)["image"]
-        return image
+        bbox_params = A.BboxParams(format='pascal_voc', label_fields=['category_ids']) if train else None
+        self.transform = A.Compose(
+            [getattr(A, name)(**kwargs) for name, kwargs in aug_kwargs.items()],
+            bbox_params=bbox_params
+            )
+
+    def __call__(self, image: np.ndarray, bboxes: List[np.ndarray] = None, category_ids: List[int] = None):
+        if self.train:
+            return self.transform(image=image, bboxes=bboxes, category_ids=category_ids)
+        else:
+            return self.transform(image=image)
 
 
 class ChestXRayDataset(Dataset):
@@ -275,9 +283,10 @@ def get_vinbigdata_dicts(
     return dataset_dicts
 
 
-def get_vinbigdata_dicts_test(imgdir: Path, test_meta: pd.DataFrame, use_cache: bool = True, debug: bool = True):
+def get_vinbigdata_dicts_test(imgdir: Path, test_meta: pd.DataFrame, use_cache: bool = True, debug: bool = True, test_data_type: str = "original"):
     debug_str = f"_debug{int(debug)}"
-    cache_path = Path(".") / f"dataset_dicts_cache_test{debug_str}.pkl"
+    test_data_type_str = f"_{test_data_type}"
+    cache_path = Path(".") / f"dataset_dicts_cache_test{test_data_type_str}{debug_str}.pkl"
     if not use_cache or not cache_path.exists():
         print("Creating data...")
         # test_meta = pd.read_csv(imgdir / "test_meta.csv")
