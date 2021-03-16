@@ -13,6 +13,7 @@ import cv2
 import torch
 from torch.utils.data.dataset import Dataset
 from sklearn.model_selection import StratifiedKFold
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 import torchvision
 assert torch.__version__.startswith("1.7")
@@ -210,9 +211,72 @@ class StratifiedKFoldWrapper:
         return train_ds, valid_ds
 
 
+class MultilabelKFoldWrapper:
+    NOFINDING = 14
+    
+    def __init__(self, train: pd.DataFrame, n_splits: int, seed: int):
+        if self.NOFINDING in train['class_id'].unique():
+            self.train = train.query(f'class_id != {self.NOFINDING}').reset_index(drop=True)
+            print(f'Removing class_id = {self.NOFINDING}: {train.shape[0]} → {self.train.shape[0]}')
+        else:
+            self.train = train
+        self.classes = [f'class_{i}' for i in range(14)]
+
+        self.n_splits = n_splits
+        self.seed = seed
+        
+        self.annot_pivot = None
+        self.stats = None
+        
+        self.__i = -1
+        self.__split()
+    
+    def __iter__(self):
+        self.__i = -1
+        return self
+    
+    def __next__(self):
+        self.__i += 1
+        if self.__i < 0 or self.n_splits <= self.__i:
+            raise StopIteration()
+        return self.__getitem__(idx=self.__i)
+    
+    def __len__(self) -> int:
+        return self.n_splits
+    
+    def __getitem__(self, idx: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        if idx < 0 or self.n_splits <= idx:
+            raise ValueError()
+        return self.train.query(f'fold != {idx}').reset_index(drop=True), self.train.query(f'fold == {idx}').reset_index(drop=True)
+    
+    def __split(self) -> None:
+        kf = MultilabelStratifiedKFold(n_splits=self.n_splits, shuffle=True, random_state=self.seed)
+        self.train['id'] = self.train.index
+        annot_pivot = pd.pivot_table(self.train, index='image_id', columns='class_id', values='id', fill_value=0, aggfunc='count').reset_index().rename_axis(None, axis=1)
+        annot_pivot = annot_pivot.rename(columns={i: cls_nm for i, cls_nm in enumerate(self.classes)})
+
+        annot_pivot['fold'] = -1
+        for fold, (train_idx, valid_idx) in enumerate(kf.split(annot_pivot, annot_pivot.loc[:, self.classes])):
+            annot_pivot.loc[valid_idx, 'fold'] = fold
+        
+        self.annot_pivot = annot_pivot
+        self.stats = self.annot_pivot.groupby('fold').sum().reset_index()
+        
+        self.train = pd.merge(self.train, self.annot_pivot, how='left', on='image_id').drop(columns=['id'] + self.classes)
+    
+    def plot_stats(self) -> None:
+        fig, axes = plt.subplots(1, 5, figsize=(25, 6))
+        cols = self.stats.columns[1:-1]
+        for fold, ax in enumerate(axes):
+            ax.bar(cols, self.stats.loc[fold, cols], tick_label=cols)
+            ax.set_title(f'fold = {fold}')
+        plt.show()
+
+
 def get_vinbigdata_dicts(
     imgdir: Path,
     train_df: pd.DataFrame,
+    meta_filepath: Path,
     train_data_type: str = "original",
     use_cache: bool = True,
     debug: bool = True,
@@ -223,7 +287,7 @@ def get_vinbigdata_dicts(
     cache_path = Path(".") / f"dataset_dicts_cache{train_data_type_str}{debug_str}.pkl"
     if not use_cache or not cache_path.exists():
         print("Creating data...")
-        train_meta = pd.read_csv(imgdir / "train_meta.csv")
+        train_meta = pd.read_csv(meta_filepath)
         if debug:
             train_meta = train_meta.iloc[:500]  # For debug....
 
@@ -321,3 +385,42 @@ def get_vinbigdata_dicts_test(imgdir: Path, test_meta: pd.DataFrame, use_cache: 
     with open(cache_path, mode="rb") as f:
         dataset_dicts = pickle.load(f)
     return dataset_dicts
+
+
+class VinBigDataset(Dataset):
+    def __init__(self, dataset_dicts: Dict[str, Any], transform: Transform, train: bool = True):
+        self.train = train
+        if self.train:
+            assert not len([dd for dd in dataset_dicts if len(dd['annotations']) > 0]) == 0
+        self.dataset_dicts = dataset_dicts
+        self.transform = transform
+        
+        self.image_ids, counts = np.unique([dd['image_id'] for dd in self.dataset_dicts], return_counts=True)
+        self.image_ids = self.image_ids.tolist()
+        assert np.all(counts == 1)
+    
+    def __len__(self) -> int:
+        return len(self.dataset_dicts)
+    
+    def __getitem__(self, index: int):
+        img = cv2.imread(self.dataset_dicts[index]['file_name'])
+        
+        if self.train:
+            bboxes, category_ids = list(), list()
+            for annot in self.dataset_dicts[index]['annotations']:
+                bboxes += [annot['bbox']]
+                category_ids += [annot['category_id']]
+            
+            transformed = self.transform(image=img, bboxes=bboxes, category_ids=category_ids)
+        
+            target = {}
+            target['boxes'] = torch.tensor(np.vstack(transformed['bboxes']), dtype=torch.float32)
+            target['labels'] = torch.tensor(transformed['category_ids'], dtype=torch.int64)
+            target['image_id'] = torch.tensor([index])
+            target['area'] = torch.tensor((target['boxes'][:, 3] - target['boxes'][:, 1]) * (target['boxes'][:, 2] - target['boxes'][:, 0]), dtype=torch.float32)
+            target['iscrowd'] = torch.zeros((len(self.dataset_dicts[index]['annotations']), ), dtype=torch.int64)
+
+            return torch.tensor(np.transpose(transformed['image'], (2, 0, 1)).astype(np.float32)), target, self.dataset_dicts[index]['image_id']
+        else:
+            img = self.transform(image=img)['image']
+            return torch.tensor(np.transpose(img, (2, 0, 1)).astype(np.float32)), self.dataset_dicts[index]['image_id']
