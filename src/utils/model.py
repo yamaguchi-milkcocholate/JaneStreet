@@ -20,6 +20,11 @@ from pytorch_pfn_extras.training.manager import ExtensionsManager
 from sklearn.metrics import average_precision_score
 from logging import getLogger
 from ignite.engine import Engine
+import pytorch_lightning as pl
+from functools import reduce
+from operator import add
+from copy import deepcopy
+from .eval import VinBigDataEval
 
 
 # Metrics
@@ -265,3 +270,130 @@ def build_predictor(model_name: str, model_mode: str = "normal"):
         return CNNFixedPredictor(timm_model, num_classes=2)
     else:
         raise ValueError(f"[ERROR] Unexpected value model_mode={model_mode}")
+
+
+import torchvision
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+
+
+def load_faster_rcnn():
+    # load a model pre-trained pre-trained on COCO
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+
+    # replace the classifier with a new one, that has
+    # num_classes which is user-defined
+    num_classes = 15  # 14 class (person) + background
+    # get number of input features for the classifier
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    # replace the pre-trained head with a new one
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    
+    return model
+
+
+class ObjectDetector(pl.LightningModule):
+    def __init__(self, model: torch.nn.Module, train_evaluator: VinBigDataEval, valid_evaluator: VinBigDataEval, outdir: Path):
+        super().__init__()
+        self.model = model
+        
+        self.history = {c: list() for c in ['train_loss', 'valid_loss', 'valid_mAP@.4', 'valid_mAP@.4_s', 'valid_mAP@.4_m', 'valid_mAP@.4_l']}
+        
+        self.train_evaluator = train_evaluator
+        self.valid_evaluator = valid_evaluator
+        
+        self.outdir = outdir
+            
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # in lightning, forward defines the prediction/inference actions
+        return self.model(x)
+    
+    def training_step(self, train_batch, batch_idx):        
+        images, targets, _ = train_batch
+        images, targets = self.__to_gpu(images, targets)
+        
+        loss_dict = self.model(images, targets)
+        losses = sum(loss for loss in loss_dict.values())
+        loss_value = losses.item()
+        
+        self.log('train_loss', loss_value, prog_bar=True)
+        
+        return {'loss': losses}
+    
+    def training_epoch_end(self, outputs: List[Dict[str, Any]]):
+        self.__logging(metric='train_loss', value=np.mean([float(op['loss']) for op in outputs]))
+    
+    def validation_step(self, valid_batch, batch_idx):        
+        images, targets, image_ids = valid_batch
+        images, targets = self.__to_gpu(images, targets)
+        
+        with torch.no_grad():
+            self.model.train()
+            loss_dict = self.model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
+            loss_value = losses.item()
+            
+            self.model.eval()
+            preds = self.model(images)
+        
+        self.log('valid_loss', loss_value, prog_bar=True)
+        
+        return {'loss': loss_value, 'preds': preds, 'image_ids': image_ids}
+    
+    def validation_epoch_end(self, outputs: List[Dict[str, Any]]):
+        preds = reduce(add, [op['preds'] for op in outputs])
+        image_ids = reduce(add, [op['image_ids'] for op in outputs])
+        
+        pred_df = self.to_predict_string(preds=preds, image_ids=image_ids)
+        results = self.valid_evaluator.evaluate(pred_df)
+        
+        if results.stats[0] > (np.max(self.history['valid_mAP@.4']) if len(self.history['valid_mAP@.4']) else 0):
+            torch.save(self.state_dict(), str(self.outdir / 'model_best.pt'))
+        
+        self.__logging(metric='valid_loss', value=np.mean([float(op['loss']) for op in outputs]))
+        self.__logging(metric='valid_mAP@.4', value=results.stats[0])
+        self.__logging(metric='valid_mAP@.4_s', value=results.stats[3], prog_bar=False)
+        self.__logging(metric='valid_mAP@.4_m', value=results.stats[4], prog_bar=False)
+        self.__logging(metric='valid_mAP@.4_l', value=results.stats[5], prog_bar=False)
+        
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer
+    
+    def to_dataframe(self) -> pd.DataFrame:
+        records = self.history.copy()
+        
+        min_len = min([len(self.history[metric]) for metric in self.history.keys()])
+        for metric in records.keys():
+            records[metric] = records[metric][-min_len:]
+            
+        return pd.DataFrame(records)
+    
+    def to_predict_string(self, preds: List[Dict[str, torch.Tensor]], image_ids: List[str]) -> pd.DataFrame:    
+        assert len(preds) == len(image_ids)
+        
+        records = {'image_id': list(), 'PredictionString': list()}
+
+        for pred, image_id in zip(preds, image_ids):
+            boxes = pred['boxes'].detach().cpu().numpy()
+            labels = pred['labels'].detach().cpu().numpy()
+            scores = pred['scores'].detach().cpu().numpy()
+
+            pred_list = []
+            for box, label, score in zip(boxes, labels, scores):
+                pred_list += [str(label)] + [str(score)] + box.astype(int).astype(str).tolist()
+
+            records['image_id'] += [image_id]
+            records['PredictionString'] += [' '.join(pred_list)]
+        return pd.DataFrame(records)
+    
+    def __to_gpu(self, images, targets) -> Tuple[torch.tensor, torch.tensor]:
+        images = list(image.to(self.device) for image in images)
+        targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+        
+        return images, targets
+        
+    def __logging(self, metric: str, value: float, prog_bar: bool = True):
+        self.log(metric, value, prog_bar=prog_bar)
+        
+        assert metric in self.history.keys()
+        self.history[metric] += [value]
