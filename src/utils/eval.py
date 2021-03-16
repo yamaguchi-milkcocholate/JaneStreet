@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from typing import *
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -144,7 +145,7 @@ class VinBigDataEval:
                 
         return results
                 
-    def evaluate(self, pred_df, n_imgs = -1):
+    def evaluate(self, pred_df, n_imgs = -1, category_ids: List[int] = None):
         """Evaluating your results
         
         Arguments:
@@ -153,6 +154,8 @@ class VinBigDataEval:
 
             n_imgs:  int Number of images use for calculating the
                      result.All of the images if `n_imgs` <= 0
+            
+            category_ids: List[int] K cat ids to use for evaluation
                      
         Returns:
             COCOEval object
@@ -175,6 +178,8 @@ class VinBigDataEval:
             imgIds = np.random.choice(imgIds, n_imgs)
 
         cocoEval = COCOeval(coco_ds, coco_dt, 'bbox')
+        if category_ids:
+            cocoEval.params.catIds = category_ids
         cocoEval.params.imgIds  = imgIds
         cocoEval.params.useCats = True
         cocoEval.params.iouType = "bbox"
