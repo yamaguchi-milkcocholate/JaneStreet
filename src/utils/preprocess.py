@@ -1,6 +1,7 @@
 from typing import *
 from pathlib import Path
 from tqdm.notebook import tqdm
+from copy import deepcopy
 import os
 import sys
 import gc
@@ -392,7 +393,7 @@ class VinBigDataset(Dataset):
         self.train = train
         if self.train:
             assert not len([dd for dd in dataset_dicts if len(dd['annotations']) > 0]) == 0
-        self.dataset_dicts = dataset_dicts
+        self.dataset_dicts = deepcopy(dataset_dicts)
         self.transform = transform
         
         self.image_ids, counts = np.unique([dd['image_id'] for dd in self.dataset_dicts], return_counts=True)
