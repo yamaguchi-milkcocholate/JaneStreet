@@ -215,13 +215,13 @@ class StratifiedKFoldWrapper:
 class MultilabelKFoldWrapper:
     NOFINDING = 14
     
-    def __init__(self, train: pd.DataFrame, n_splits: int, seed: int):
-        if self.NOFINDING in train['class_id'].unique():
+    def __init__(self, train: pd.DataFrame, n_splits: int, seed: int, remove_normal: bool = True):
+        if self.NOFINDING in train['class_id'].unique() and remove_normal:
             self.train = train.query(f'class_id != {self.NOFINDING}').reset_index(drop=True)
             print(f'Removing class_id = {self.NOFINDING}: {train.shape[0]} → {self.train.shape[0]}')
         else:
             self.train = train
-        self.classes = [f'class_{i}' for i in range(14)]
+        self.classes = [f'class_{i}' for i in range(14 if remove_normal else 15)]
 
         self.n_splits = n_splits
         self.seed = seed
@@ -324,10 +324,10 @@ def get_vinbigdata_dicts(
                     h_ratio = resized_height / height
                     w_ratio = resized_width / width
                     bbox_resized = [
-                        int(row["x_min"]) * w_ratio,
-                        int(row["y_min"]) * h_ratio,
-                        int(row["x_max"]) * w_ratio,
-                        int(row["y_max"]) * h_ratio,
+                        float(row["x_min"]) * w_ratio,
+                        float(row["y_min"]) * h_ratio,
+                        float(row["x_max"]) * w_ratio,
+                        float(row["y_max"]) * h_ratio,
                     ]
                     obj = {
                         "bbox": bbox_resized,
@@ -389,7 +389,7 @@ def get_vinbigdata_dicts_test(imgdir: Path, test_meta: pd.DataFrame, use_cache: 
 
 
 class VinBigDataset(Dataset):
-    def __init__(self, dataset_dicts: Dict[str, Any], transform: Transform, train: bool = True):
+    def __init__(self, dataset_dicts: Dict[str, Any], transform: Transform, train: bool = True, normal_label: int = 14):
         self.train = train
         if self.train:
             assert not len([dd for dd in dataset_dicts if len(dd['annotations']) > 0]) == 0
@@ -399,6 +399,8 @@ class VinBigDataset(Dataset):
         self.image_ids, counts = np.unique([dd['image_id'] for dd in self.dataset_dicts], return_counts=True)
         self.image_ids = self.image_ids.tolist()
         assert np.all(counts == 1)
+
+        self.normal_label = normal_label
     
     def __len__(self) -> int:
         return len(self.dataset_dicts)
@@ -413,12 +415,19 @@ class VinBigDataset(Dataset):
                 category_ids += [annot['category_id']]
             
             transformed = self.transform(image=img, bboxes=bboxes, category_ids=category_ids)
-        
+
             target = {}
-            target['boxes'] = torch.tensor(np.vstack(transformed['bboxes']), dtype=torch.float32)
-            target['labels'] = torch.tensor(transformed['category_ids'], dtype=torch.int64)
+
+            if len(transformed['bboxes']) > 0:
+                target['boxes'] = torch.tensor(np.vstack(transformed['bboxes']), dtype=torch.float32)
+                target['labels'] = torch.tensor(transformed['category_ids'], dtype=torch.int64)
+                target['area'] = torch.tensor((target['boxes'][:, 3] - target['boxes'][:, 1]) * (target['boxes'][:, 2] - target['boxes'][:, 0]), dtype=torch.float32)
+            else: 
+                target['boxes'] = torch.tensor([[0, 0, self.dataset_dicts[index]['width'], self.dataset_dicts[index]['height']]], dtype=torch.float32)
+                target['labels'] = torch.tensor([self.normal_label], dtype=torch.int64)
+                target['area'] = torch.tensor([1], dtype=torch.float32)
+        
             target['image_id'] = torch.tensor([index])
-            target['area'] = torch.tensor((target['boxes'][:, 3] - target['boxes'][:, 1]) * (target['boxes'][:, 2] - target['boxes'][:, 0]), dtype=torch.float32)
             target['iscrowd'] = torch.zeros((len(self.dataset_dicts[index]['annotations']), ), dtype=torch.int64)
 
             return torch.tensor(np.transpose(transformed['image'], (2, 0, 1)).astype(np.float32)), target, self.dataset_dicts[index]['image_id']
