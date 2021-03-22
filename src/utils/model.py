@@ -276,13 +276,13 @@ import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 
-def load_faster_rcnn():
+def load_faster_rcnn(num_classes: int):
     # load a model pre-trained pre-trained on COCO
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
 
     # replace the classifier with a new one, that has
     # num_classes which is user-defined
-    num_classes = 15  # 14 class (person) + background
+    
     # get number of input features for the classifier
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     # replace the pre-trained head with a new one
