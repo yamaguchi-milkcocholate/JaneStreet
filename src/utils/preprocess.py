@@ -2,6 +2,7 @@ from typing import *
 from pathlib import Path
 from tqdm.notebook import tqdm
 from copy import deepcopy
+from matplotlib import pyplot as plt
 import os
 import sys
 import gc
