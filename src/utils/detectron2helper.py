@@ -922,10 +922,14 @@ from detectron2.engine import DefaultPredictor, DefaultTrainer, launch
 
 
 class MyTrainer(DefaultTrainer):
-    @classmethod
-    def build_train_loader(cls, cfg, sampler=None):
+    
+    def __init__(self, cfg, sampler=None):
+        self.sampler = sampler
+        super().__init__(cfg)
+    
+    def build_train_loader(self, cfg):
         return build_detection_train_loader(
-            cfg, mapper=AlbumentationsMapper(cfg, True), sampler=sampler
+            cfg, mapper=AlbumentationsMapper(cfg, True), sampler=self.sampler
         )
 
     @classmethod
@@ -954,5 +958,3 @@ class MyTrainer(DefaultTrainer):
             hooks.insert(-1, loss_eval_hook)
 
         return hooks
-
-
