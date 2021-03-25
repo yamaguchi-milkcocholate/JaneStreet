@@ -1,2 +1,8 @@
 results*/*
 *.pkl
+lightning_logs/*
+mistake/*
+abnormalonly/*
+mmdetection/*
+__trush/*
+detectron2_results/*

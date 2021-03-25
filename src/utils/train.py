@@ -15,7 +15,7 @@ from ignite.engine import Events, Events, create_supervised_evaluator, create_su
 from ignite.handlers import EarlyStopping
 from ignite.metrics import Accuracy, Loss
 from ignite.contrib.handlers import ProgressBar
-from ignite.contrib.handlers.param_scheduler import LRScheduler
+from ignite.contrib.handlers.param_scheduler import LRScheduler, CosineAnnealingScheduler, LinearCyclicalScheduler
 from ignite.contrib.metrics import AveragePrecision
 
 
@@ -42,7 +42,7 @@ def probability_output_transform(output):
 
 
 def train(epochs: int, model: nn.Module, train_loader: DataLoader, valid_loader: DataLoader, criterion: Callable,
-          device: str, lr: float, patience: int, lr_decay: float, lr_scheduler: str, lr_scheduler_kwargs: Dict[str, Any]):
+          device: str, lr: float, patience: int, lr_start: float, lr_end: str):
     
     model.to(torch.device(device))
     optimizer = optim.Adam([param for param in model.parameters() if param.requires_grad], lr=lr)
@@ -53,9 +53,17 @@ def train(epochs: int, model: nn.Module, train_loader: DataLoader, valid_loader:
         criterion, 
         device=device
     )
-    
-    scheduler = LRScheduler(getattr(optim.lr_scheduler, lr_scheduler)(optimizer, **lr_scheduler_kwargs))
-    trainer.add_event_handler(Events.ITERATION_COMPLETED, scheduler)
+    scheduler = LinearCyclicalScheduler(
+        optimizer=optimizer, 
+        param_name='lr', 
+        start_value=lr_start, 
+        end_value=lr_end, 
+        cycle_size=len(train_loader)
+        )
+    trainer.add_event_handler(Events.ITERATION_STARTED, scheduler)
+
+    # scheduler = LRScheduler(getattr(optim.lr_scheduler, lr_scheduler)(optimizer, **lr_scheduler_kwargs))
+    # trainer.add_event_handler(Events.ITERATION_COMPLETED, scheduler)
     
     pbar = ProgressBar(False)
     pbar.attach(trainer)
