@@ -6,3 +6,6 @@ abnormalonly/*
 mmdetection/*
 __trush/*
 detectron2_results/*
+yolov5_results/*
+yolov5/*
+chest_yolo/*
